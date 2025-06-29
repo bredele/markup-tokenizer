@@ -1,0 +1,33 @@
+{
+  "name": "markup-tokenizer",
+  "version": "1.0.0",
+  "description": "A fast and fault-tolerant markup tokenizer",
+  "main": "dist/cjs/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "cmplr --type-check",
+    "test": "node --test dist/cjs/**/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bredele/markup-tokenizer.git"
+  },
+  "keywords": [
+    "markup",
+    "tokenizer",
+    "html",
+    "xml"
+  ],
+  "author": "Olivier Wietrich",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/bredele/markup-tokenizer/issues"
+  },
+  "homepage": "https://github.com/bredele/markup-tokenizer#readme",
+  "devDependencies": {
+    "@types/node": "^24.0.7",
+    "cmplr": "^1.1.0"
+  }
+}
