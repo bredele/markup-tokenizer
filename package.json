@@ -1,7 +1,7 @@
 {
   "name": "markup-tokenizer",
   "version": "1.0.0",
-  "description": "A fast and fault-tolerant markup tokenizer",
+  "description": "Markup tokenizer stream",
   "main": "dist/cjs/index.js",
   "files": [
     "dist"
