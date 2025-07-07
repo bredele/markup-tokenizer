@@ -5,10 +5,10 @@ import { MarkupTokenizer } from './index.js';
 
 type Token = [string, Buffer];
 
-const tokenize = (input: string): Promise<Token[]> =>
+const tokenize = (input: string, options?: {ignoreText?: boolean}): Promise<Token[]> =>
   new Promise((resolve, reject) => {
     const tokens: Token[] = [];
-    const tokenizer = new MarkupTokenizer();
+    const tokenizer = new MarkupTokenizer(options);
     
     tokenizer.on('data', (token: Token) => {
       tokens.push(token);
@@ -453,6 +453,115 @@ describe('MarkupTokenizer', () => {
       assert.equal(tokens[0][0], 'open');
       assert.equal(tokens[1][0], 'text');
       assert.equal(bufferToString(tokens[1][1]), 'content');
+    });
+  });
+
+  describe('ignoreText option', () => {
+    test('simple text ignored', async () => {
+      const tokens = await tokenize('hello world', { ignoreText: true });
+      assert.equal(tokens.length, 0);
+    });
+
+    test('simple tag with text ignored', async () => {
+      const tokens = await tokenize('<div>hello</div>', { ignoreText: true });
+      assert.equal(tokens.length, 2);
+      assert.equal(tokens[0][0], 'open');
+      assert.equal(bufferToString(tokens[0][1]), '<div>');
+      assert.equal(tokens[1][0], 'close');
+      assert.equal(bufferToString(tokens[1][1]), '</div>');
+    });
+
+    test('nested tags with text ignored', async () => {
+      const tokens = await tokenize('<div><span>hello</span></div>', { ignoreText: true });
+      assert.equal(tokens.length, 4);
+      assert.equal(tokens[0][0], 'open');
+      assert.equal(bufferToString(tokens[0][1]), '<div>');
+      assert.equal(tokens[1][0], 'open');
+      assert.equal(bufferToString(tokens[1][1]), '<span>');
+      assert.equal(tokens[2][0], 'close');
+      assert.equal(bufferToString(tokens[2][1]), '</span>');
+      assert.equal(tokens[3][0], 'close');
+      assert.equal(bufferToString(tokens[3][1]), '</div>');
+    });
+
+    test('mixed content with text ignored', async () => {
+      const tokens = await tokenize('Text & <em>emphasis</em> > more text', { ignoreText: true });
+      assert.equal(tokens.length, 2);
+      assert.equal(tokens[0][0], 'open');
+      assert.equal(bufferToString(tokens[0][1]), '<em>');
+      assert.equal(tokens[1][0], 'close');
+      assert.equal(bufferToString(tokens[1][1]), '</em>');
+    });
+
+    test('whitespace handling with text ignored', async () => {
+      const tokens = await tokenize('  <div  class="test"  >  content  </div>  ', { ignoreText: true });
+      assert.equal(tokens.length, 2);
+      assert.equal(tokens[0][0], 'open');
+      assert.equal(bufferToString(tokens[0][1]), '<div  class="test"  >');
+      assert.equal(tokens[1][0], 'close');
+      assert.equal(bufferToString(tokens[1][1]), '</div>');
+    });
+
+    test('comments with text ignored', async () => {
+      const tokens = await tokenize('<!-- hello -->', { ignoreText: true });
+      assert.equal(tokens.length, 2);
+      assert.equal(tokens[0][0], 'open');
+      assert.equal(bufferToString(tokens[0][1]), '<!--');
+      assert.equal(tokens[1][0], 'close');
+      assert.equal(bufferToString(tokens[1][1]), '-->');
+    });
+
+    test('script tags with text ignored', async () => {
+      const tokens = await tokenize('<script>alert("hello");</script>', { ignoreText: true });
+      assert.equal(tokens.length, 2);
+      assert.equal(tokens[0][0], 'open');
+      assert.equal(bufferToString(tokens[0][1]), '<script>');
+      assert.equal(tokens[1][0], 'close');
+      assert.equal(bufferToString(tokens[1][1]), '</script>');
+    });
+
+    test('style tags with text ignored', async () => {
+      const tokens = await tokenize('<style>body { color: red; }</style>', { ignoreText: true });
+      assert.equal(tokens.length, 2);
+      assert.equal(tokens[0][0], 'open');
+      assert.equal(bufferToString(tokens[0][1]), '<style>');
+      assert.equal(tokens[1][0], 'close');
+      assert.equal(bufferToString(tokens[1][1]), '</style>');
+    });
+
+    test('title tags with text ignored', async () => {
+      const tokens = await tokenize('<title>Page Title</title>', { ignoreText: true });
+      assert.equal(tokens.length, 2);
+      assert.equal(tokens[0][0], 'open');
+      assert.equal(bufferToString(tokens[0][1]), '<title>');
+      assert.equal(tokens[1][0], 'close');
+      assert.equal(bufferToString(tokens[1][1]), '</title>');
+    });
+
+    test('complex document with text ignored', async () => {
+      const html = `
+        <html>
+          <head>
+            <title>Test Page</title>
+            <style>body { margin: 0; }</style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>Title</h1>
+              <p>Some text content</p>
+              <script>console.log('test');</script>
+            </div>
+          </body>
+        </html>
+      `;
+      const tokens = await tokenize(html, { ignoreText: true });
+      // Should only have open and close tags, no text tokens
+      const textTokens = tokens.filter(token => token[0] === 'text');
+      assert.equal(textTokens.length, 0);
+      
+      const openTokens = tokens.filter(token => token[0] === 'open');
+      const closeTokens = tokens.filter(token => token[0] === 'close');
+      assert.equal(openTokens.length, closeTokens.length);
     });
   });
 });

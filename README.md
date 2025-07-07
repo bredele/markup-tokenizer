@@ -36,3 +36,27 @@ This produces:
 ["text", "\n"]
 ["close", "</section>"]
 ```
+
+## Options
+
+### `ignoreText`
+
+You can ignore text nodes for performance when you only need the markup structure:
+
+```ts
+import tokenizer from "markup-tokenizer";
+
+// Only emit open/close tags, skip text content
+const stream = tokenizer({ ignoreText: true });
+```
+
+With `ignoreText: true`, the same HTML produces:
+
+```
+["open", "<section>"]
+["open", '<a href="/hello">']
+["close", "</a>"]
+["close", "</section>"]
+```
+
+This option provides significant performance benefits when processing large documents where text content is not needed.

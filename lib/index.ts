@@ -36,6 +36,10 @@ const COMMENT_END = Buffer.from("-->", "utf8");
 type TokenType = "text" | "open" | "close";
 type Token = [TokenType, Buffer];
 
+interface MarkupTokenizerOptions {
+  ignoreText?: boolean;
+}
+
 function compare(a: number[], b: Buffer): boolean {
   const aLen = a.length;
   const bLen = b.length;
@@ -58,6 +62,7 @@ export class MarkupTokenizer extends Transform {
   private quoteState: number = NO_QUOTE;
   private raw: Buffer | null = null;
   private buffers: Buffer[] = [];
+  private ignoreText: boolean = false;
 
   // Circular buffer for last bytes (more efficient than push/shift)
   private _last: number[] = new Array(9);
@@ -67,8 +72,9 @@ export class MarkupTokenizer extends Transform {
   private _prev: Buffer | null = null;
   private _offset: number = 0;
 
-  constructor() {
+  constructor(options: MarkupTokenizerOptions = {}) {
     super({ objectMode: true });
+    this.ignoreText = options.ignoreText ?? false;
   }
 
   _transform = (
@@ -102,7 +108,9 @@ export class MarkupTokenizer extends Transform {
       if (this.raw) {
         const parts = this._testRaw(buf, offset, i);
         if (parts) {
-          this.push(["text", parts[0]]);
+          if (!this.ignoreText) {
+            this.push(["text", parts[0]]);
+          }
 
           if (this.raw === COMMENT_END) {
             this.state = TEXT_STATE;
@@ -138,12 +146,16 @@ export class MarkupTokenizer extends Transform {
             nextByte !== CR
           ) {
             if (i > offset) {
-              this.buffers.push(buf.subarray(offset, i));
+              if (!this.ignoreText) {
+                this.buffers.push(buf.subarray(offset, i));
+              }
             }
             offset = i;
             this.state = OPEN_STATE;
             this.tagState = TAG_NAME_STATE;
-            this._pushState("text");
+            if (!this.ignoreText) {
+              this._pushState("text");
+            }
           }
         }
       }
@@ -214,12 +226,12 @@ export class MarkupTokenizer extends Transform {
       }
     }
 
-    if (offset < buf.length) this.buffers.push(buf.subarray(offset));
+    if (offset < buf.length && !this.ignoreText) this.buffers.push(buf.subarray(offset));
     next();
   };
 
   _flush = (next: TransformCallback): void => {
-    if (this.state === TEXT_STATE) this._pushState("text");
+    if (this.state === TEXT_STATE && !this.ignoreText) this._pushState("text");
     this.push(null);
     next();
   };
@@ -243,6 +255,10 @@ export class MarkupTokenizer extends Transform {
 
   private _pushState = (ev: TokenType): void => {
     if (this.buffers.length === 0) return;
+    if (this.ignoreText && ev === "text") {
+      this.buffers = [];
+      return;
+    }
     const buf = Buffer.concat(this.buffers);
     this.buffers = [];
     this.push([ev, buf] as Token);
@@ -309,6 +325,6 @@ export class MarkupTokenizer extends Transform {
   };
 }
 
-export default () => {
-  return new MarkupTokenizer();
+export default (options?: MarkupTokenizerOptions) => {
+  return new MarkupTokenizer(options);
 };
