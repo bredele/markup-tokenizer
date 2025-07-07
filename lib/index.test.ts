@@ -152,40 +152,6 @@ describe('MarkupTokenizer', () => {
     });
   });
 
-  describe('CDATA', () => {
-    test('simple CDATA', async () => {
-      const tokens = await tokenize('<![CDATA[hello]]>');
-      assert.equal(tokens.length, 3);
-      assert.equal(tokens[0][0], 'open');
-      assert.equal(bufferToString(tokens[0][1]), '<![CDATA[');
-      assert.equal(tokens[1][0], 'text');
-      assert.equal(bufferToString(tokens[1][1]), 'hello');
-      assert.equal(tokens[2][0], 'close');
-      assert.equal(bufferToString(tokens[2][1]), ']]>');
-    });
-
-    test('CDATA with markup inside', async () => {
-      const tokens = await tokenize('<![CDATA[<div>test</div>]]>');
-      assert.equal(tokens.length, 3);
-      assert.equal(tokens[0][0], 'open');
-      assert.equal(bufferToString(tokens[0][1]), '<![CDATA[');
-      assert.equal(tokens[1][0], 'text');
-      assert.equal(bufferToString(tokens[1][1]), '<div>test</div>');
-      assert.equal(tokens[2][0], 'close');
-      assert.equal(bufferToString(tokens[2][1]), ']]>');
-    });
-
-    test('CDATA with special characters', async () => {
-      const tokens = await tokenize('<![CDATA[&lt;&gt;&amp;]]>');
-      assert.equal(tokens.length, 3);
-      assert.equal(tokens[0][0], 'open');
-      assert.equal(bufferToString(tokens[0][1]), '<![CDATA[');
-      assert.equal(tokens[1][0], 'text');
-      assert.equal(bufferToString(tokens[1][1]), '&lt;&gt;&amp;');
-      assert.equal(tokens[2][0], 'close');
-      assert.equal(bufferToString(tokens[2][1]), ']]>');
-    });
-  });
 
   describe('Script tags', () => {
     test('simple script', async () => {

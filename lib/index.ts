@@ -1,320 +1,314 @@
 import { Transform, TransformCallback } from "node:stream";
 
-const enum CharCode {
-  LT = 60, // '<'
-  GT = 62, // '>'
-  SLASH = 47, // '/'
-  DQUOTE = 34, // '"'
-  SQUOTE = 39, // "'"
-  EQUAL = 61, // '='
-  SPACE = 32, // ' '
-  TAB = 9, // '\t'
-  LF = 10, // '\n'
-  FF = 12, // '\f'
-  CR = 13, // '\r'
-}
+// Character codes for V8 optimization (cached constants)
+const LT = 60; // '<'
+const GT = 62; // '>'
+const SLASH = 47; // '/'
+const DQUOTE = 34; // '"'
+const SQUOTE = 39; // "'"
+const EQUAL = 61; // '='
+const SPACE = 0x20;
+const TAB = 0x09;
+const LF = 0x0a;
+const FF = 0x0c;
+const CR = 0x0d;
 
-const enum TagState {
-  TagName = 1,
-  AttributeName = 2,
-  BeforeAttributeValue = 3,
-  AttributeValue = 4,
-}
+// State constants for monomorphic property access
+const TEXT_STATE = 0;
+const OPEN_STATE = 1;
 
-const enum ParseState {
-  Text = "text",
-  Open = "open",
-}
+const TAG_NAME_STATE = 1;
+const ATTRIBUTE_NAME_STATE = 2;
+const BEFORE_ATTRIBUTE_VALUE_STATE = 3;
+const ATTRIBUTE_VALUE_STATE = 4;
 
-const enum QuoteState {
-  None = 0,
-  Double = 1,
-  Single = 2,
-}
+const NO_QUOTE = 0;
+const DOUBLE_QUOTE = 1;
+const SINGLE_QUOTE = 2;
 
+// Pre-compiled buffers
 const END_SCRIPT = Buffer.from("</script", "utf8");
 const END_STYLE = Buffer.from("</style", "utf8");
 const END_TITLE = Buffer.from("</title", "utf8");
 const COMMENT_START = Buffer.from("<!--", "utf8");
 const COMMENT_END = Buffer.from("-->", "utf8");
-const CDATA_START = Buffer.from("<![CDATA[", "utf8");
-const CDATA_END = Buffer.from("]]>", "utf8");
-
-const RAW_TAG_PATTERNS = {
-  script: END_SCRIPT,
-  style: END_STYLE,
-  title: END_TITLE,
-} as const;
 
 type TokenType = "text" | "open" | "close";
 type Token = [TokenType, Buffer];
 
-const isWhitespace = (byte: number): boolean =>
-  byte === CharCode.SPACE ||
-  byte === CharCode.TAB ||
-  byte === CharCode.LF ||
-  byte === CharCode.FF ||
-  byte === CharCode.CR;
+function compare(a: number[], b: Buffer): boolean {
+  const aLen = a.length;
+  const bLen = b.length;
+  if (aLen < bLen) return false;
 
-const toLowerCase = (byte: number): number =>
-  byte >= 65 && byte <= 90 ? byte + 32 : byte;
-
-const compareBuffers = (last: number[], pattern: Buffer): boolean => {
-  if (last.length < pattern.length) return false;
-  for (
-    let i = last.length - 1, j = pattern.length - 1;
-    i >= 0 && j >= 0;
-    i--, j--
-  ) {
-    if (toLowerCase(last[i]) !== toLowerCase(pattern[j])) return false;
+  for (let i = aLen - 1, j = bLen - 1; i >= 0 && j >= 0; i--, j--) {
+    const aChar = a[i];
+    const bChar = b[j];
+    // Inline toLowerCase for performance
+    const aLower = aChar >= 65 && aChar <= 90 ? aChar + 32 : aChar;
+    const bLower = bChar >= 65 && bChar <= 90 ? bChar + 32 : bChar;
+    if (aLower !== bLower) return false;
   }
   return true;
-};
+}
 
 export class MarkupTokenizer extends Transform {
-  private state: ParseState = ParseState.Text;
-  private tagState: TagState | null = null;
-  private quoteState: QuoteState = QuoteState.None;
-  private rawEndPattern: Buffer | null = null;
+  private state: number = TEXT_STATE;
+  private tagState: number = 0;
+  private quoteState: number = NO_QUOTE;
+  private raw: Buffer | null = null;
   private buffers: Buffer[] = [];
-  private lastBytes: number[] = [];
-  private pendingBuffer: Buffer | null = null;
-  private pendingOffset: number = 0;
-  private fromRawMode: boolean = false;
+
+  // Circular buffer for last bytes (more efficient than push/shift)
+  private _last: number[] = new Array(9);
+  private _lastIndex: number = 0;
+  private _lastCount: number = 0;
+
+  private _prev: Buffer | null = null;
+  private _offset: number = 0;
 
   constructor() {
     super({ objectMode: true });
   }
 
   _transform = (
-    chunk: Buffer,
-    encoding: BufferEncoding,
-    callback: TransformCallback
+    buf: Buffer,
+    enc: BufferEncoding,
+    next: TransformCallback
   ): void => {
-    let buffer = chunk;
-    let startIndex = 0;
-    let currentOffset = 0;
+    let i = 0;
+    let offset = 0;
+    const bufLen = buf.length;
 
-    if (this.pendingBuffer) {
-      buffer = Buffer.concat([this.pendingBuffer, chunk]);
-      startIndex = this.pendingBuffer.length - 1;
-      currentOffset = this.pendingOffset;
-      this.pendingBuffer = null;
-      this.pendingOffset = 0;
+    // Handle pending buffer from previous chunk
+    if (this._prev) {
+      buf = Buffer.concat([this._prev, buf]);
+      i = this._prev.length - 1;
+      offset = this._offset;
+      this._prev = null;
+      this._offset = 0;
     }
 
-    for (let i = startIndex; i < buffer.length; i++) {
-      const byte = buffer[i];
-      this.lastBytes.push(byte);
-      if (this.lastBytes.length > 9) this.lastBytes.shift();
+    // Main parsing loop - optimized for V8
+    for (; i < buf.length; i++) {
+      const b = buf[i];
 
-      if (this.rawEndPattern) {
-        const result = this.testRawEnd(buffer, currentOffset, i);
-        if (result) {
-          this.pushToken("text", result[0]);
-          
-          const isCommentOrCdata = this.rawEndPattern === COMMENT_END || this.rawEndPattern === CDATA_END;
-          if (isCommentOrCdata) {
-            this.pushToken("close", result[1]);
-            this.state = ParseState.Text;
+      // Circular buffer update (more efficient than push/shift)
+      this._last[this._lastIndex] = b;
+      this._lastIndex = (this._lastIndex + 1) % 9;
+      if (this._lastCount < 9) this._lastCount++;
+
+      // Raw mode handling (comments, script, style, title)
+      if (this.raw) {
+        const parts = this._testRaw(buf, offset, i);
+        if (parts) {
+          this.push(["text", parts[0]]);
+
+          if (this.raw === COMMENT_END) {
+            this.state = TEXT_STATE;
             this.buffers = [];
+            this.push(["close", parts[1]]);
           } else {
-            this.state = ParseState.Open;
-            this.buffers = [result[1]];
-            this.fromRawMode = true;
+            // For script/style/title tags, we need to continue parsing the closing tag
+            this.state = OPEN_STATE;
+            this.tagState = TAG_NAME_STATE;
+            this.buffers = [parts[1]];
           }
 
-          this.rawEndPattern = null;
-          currentOffset = i + 1;
+          this.raw = null;
+          offset = i + 1;
         }
-      } else if (
-        this.state === ParseState.Text &&
-        byte === CharCode.LT &&
-        i === buffer.length - 1
-      ) {
-        this.pendingBuffer = buffer;
-        this.pendingOffset = currentOffset;
-        return callback();
-      } else if (
-        this.state === ParseState.Text &&
-        byte === CharCode.LT &&
-        !isWhitespace(buffer[i + 1])
-      ) {
-        if (i > 0 && i - currentOffset > 0) {
-          this.buffers.push(buffer.subarray(currentOffset, i));
+      }
+      // Most common case first: text parsing
+      else if (this.state === TEXT_STATE) {
+        if (b === LT) {
+          if (i === buf.length - 1) {
+            // Need more data
+            this._prev = buf;
+            this._offset = offset;
+            return next();
+          }
+          // Inline whitespace check for performance
+          const nextByte = buf[i + 1];
+          if (
+            nextByte !== SPACE &&
+            nextByte !== TAB &&
+            nextByte !== LF &&
+            nextByte !== FF &&
+            nextByte !== CR
+          ) {
+            if (i > offset) {
+              this.buffers.push(buf.subarray(offset, i));
+            }
+            offset = i;
+            this.state = OPEN_STATE;
+            this.tagState = TAG_NAME_STATE;
+            this._pushState("text");
+          }
         }
-        currentOffset = i;
-        this.state = ParseState.Open;
-        this.tagState = TagState.TagName;
-        this.pushState("text");
-      } else if (this.tagState === TagState.TagName && isWhitespace(byte)) {
-        this.tagState = TagState.AttributeName;
-      } else if (
-        this.tagState === TagState.AttributeName &&
-        byte === CharCode.EQUAL
-      ) {
-        this.tagState = TagState.BeforeAttributeValue;
-      } else if (
-        this.tagState === TagState.BeforeAttributeValue &&
-        isWhitespace(byte)
-      ) {
-        // Skip whitespace
-      } else if (
-        this.tagState === TagState.BeforeAttributeValue &&
-        byte !== CharCode.GT
-      ) {
-        this.tagState = TagState.AttributeValue;
-        this.quoteState = 
-          byte === CharCode.DQUOTE ? QuoteState.Double :
-          byte === CharCode.SQUOTE ? QuoteState.Single :
-          QuoteState.None;
-      } else if (
-        this.tagState === TagState.AttributeValue &&
-        this.quoteState === QuoteState.None &&
-        isWhitespace(byte)
-      ) {
-        this.tagState = TagState.AttributeName;
-      } else if (
-        this.tagState === TagState.AttributeValue &&
-        this.quoteState === QuoteState.Double &&
-        byte === CharCode.DQUOTE
-      ) {
-        this.quoteState = QuoteState.None;
-        this.tagState = TagState.AttributeName;
-      } else if (
-        this.tagState === TagState.AttributeValue &&
-        this.quoteState === QuoteState.Single &&
-        byte === CharCode.SQUOTE
-      ) {
-        this.quoteState = QuoteState.None;
-        this.tagState = TagState.AttributeName;
-      } else if (
-        this.state === ParseState.Open &&
-        byte === CharCode.GT &&
-        this.quoteState === QuoteState.None
-      ) {
-        this.buffers.push(buffer.subarray(currentOffset, i + 1));
-        currentOffset = i + 1;
-        this.state = ParseState.Text;
-        this.tagState = null;
-
-        if (this.fromRawMode) {
-          this.fromRawMode = false;
-          this.pushState("close");
-        } else if (this.getByteAt(1) === CharCode.SLASH) {
-          this.pushState("close");
-        } else {
-          const tagName = this.getTagName();
-          this.rawEndPattern = RAW_TAG_PATTERNS[tagName as keyof typeof RAW_TAG_PATTERNS] || null;
-          this.pushState("open");
+      }
+      // Tag parsing state machine
+      else if (this.state === OPEN_STATE) {
+        // Check for comment first (less common but needs early detection)
+        if (compare(this._getLastBytes(), COMMENT_START)) {
+          this.buffers.push(buf.subarray(offset, i + 1));
+          offset = i + 1;
+          this.state = TEXT_STATE;
+          this.raw = COMMENT_END;
+          this._pushState("open");
         }
-      } else if (
-        this.state === ParseState.Open &&
-        compareBuffers(this.lastBytes, COMMENT_START)
-      ) {
-        this.buffers.push(buffer.subarray(currentOffset, i + 1));
-        this.pushState("open");
-        currentOffset = i + 1;
-        this.state = ParseState.Text;
-        this.rawEndPattern = COMMENT_END;
-      } else if (
-        this.state === ParseState.Open &&
-        compareBuffers(this.lastBytes, CDATA_START)
-      ) {
-        this.buffers.push(buffer.subarray(currentOffset, i + 1));
-        this.pushState("open");
-        currentOffset = i + 1;
-        this.state = ParseState.Text;
-        this.rawEndPattern = CDATA_END;
+        // Tag name state
+        else if (this.tagState === TAG_NAME_STATE) {
+          // Inline whitespace check
+          if (b === SPACE || b === TAB || b === LF || b === FF || b === CR) {
+            this.tagState = ATTRIBUTE_NAME_STATE;
+          } else if (b === GT) {
+            this._handleTagClose(buf, offset, i);
+            offset = i + 1;
+          }
+        }
+        // Attribute name state
+        else if (this.tagState === ATTRIBUTE_NAME_STATE) {
+          if (b === EQUAL) {
+            this.tagState = BEFORE_ATTRIBUTE_VALUE_STATE;
+          } else if (b === GT) {
+            this._handleTagClose(buf, offset, i);
+            offset = i + 1;
+          }
+        }
+        // Before attribute value state
+        else if (this.tagState === BEFORE_ATTRIBUTE_VALUE_STATE) {
+          // Skip whitespace
+          if (b !== SPACE && b !== TAB && b !== LF && b !== FF && b !== CR) {
+            if (b === GT) {
+              this._handleTagClose(buf, offset, i);
+              offset = i + 1;
+            } else {
+              this.tagState = ATTRIBUTE_VALUE_STATE;
+              this.quoteState =
+                b === DQUOTE
+                  ? DOUBLE_QUOTE
+                  : b === SQUOTE
+                  ? SINGLE_QUOTE
+                  : NO_QUOTE;
+            }
+          }
+        }
+        // Attribute value state
+        else if (this.tagState === ATTRIBUTE_VALUE_STATE) {
+          if (this.quoteState === NO_QUOTE) {
+            if (b === SPACE || b === TAB || b === LF || b === FF || b === CR) {
+              this.tagState = ATTRIBUTE_NAME_STATE;
+            } else if (b === GT) {
+              this._handleTagClose(buf, offset, i);
+              offset = i + 1;
+            }
+          } else if (this.quoteState === DOUBLE_QUOTE && b === DQUOTE) {
+            this.quoteState = NO_QUOTE;
+            this.tagState = ATTRIBUTE_NAME_STATE;
+          } else if (this.quoteState === SINGLE_QUOTE && b === SQUOTE) {
+            this.quoteState = NO_QUOTE;
+            this.tagState = ATTRIBUTE_NAME_STATE;
+          }
+        }
       }
     }
 
-    if (currentOffset < buffer.length) {
-      this.buffers.push(buffer.subarray(currentOffset));
-    }
+    if (offset < buf.length) this.buffers.push(buf.subarray(offset));
+    next();
+  };
 
-    callback();
+  _flush = (next: TransformCallback): void => {
+    if (this.state === TEXT_STATE) this._pushState("text");
+    this.push(null);
+    next();
+  };
+
+  private _handleTagClose(buf: Buffer, offset: number, i: number): void {
+    this.buffers.push(buf.subarray(offset, i + 1));
+    this.state = TEXT_STATE;
+    this.tagState = 0;
+    this.quoteState = NO_QUOTE;
+
+    if (this._getChar(1) === SLASH) {
+      this._pushState("close");
+    } else {
+      const tag = this._getTag();
+      if (tag === "script") this.raw = END_SCRIPT;
+      else if (tag === "style") this.raw = END_STYLE;
+      else if (tag === "title") this.raw = END_TITLE;
+      this._pushState("open");
+    }
   }
 
-  _flush = (callback: TransformCallback): void => {
-    if (this.state === ParseState.Text) {
-      this.pushState("text");
-    }
-    this.push(null);
-    callback();
-  };
-
-  private pushState = (tokenType: TokenType): void => {
+  private _pushState = (ev: TokenType): void => {
     if (this.buffers.length === 0) return;
-    const buffer = Buffer.concat(this.buffers);
+    const buf = Buffer.concat(this.buffers);
     this.buffers = [];
-    this.pushToken(tokenType, buffer);
+    this.push([ev, buf] as Token);
   };
 
-  private pushToken = (tokenType: TokenType, buffer: Buffer): void => {
-    this.push([tokenType, buffer] as Token);
-  };
-
-  private getByteAt = (index: number): number | undefined => {
+  private _getChar = (index: number): number | undefined => {
     let offset = 0;
-    for (const buffer of this.buffers) {
-      if (offset + buffer.length > index) {
-        return buffer[index - offset];
+    for (let j = 0; j < this.buffers.length; j++) {
+      const buf = this.buffers[j];
+      if (offset + buf.length > index) {
+        return buf[index - offset];
       }
-      offset += buffer.length;
+      offset += buf.length;
     }
-    return undefined;
   };
 
-  private getTagName = (): string => {
-    let tagName = "";
-    let skipFirst = true;
-
-    for (const buffer of this.buffers) {
-      for (let k = 0; k < buffer.length; k++) {
-        if (skipFirst && k === 0) {
-          skipFirst = false;
-          continue; // Skip initial '<'
-        }
-        
-        const byte = buffer[k];
-        // Check for valid tag name characters (faster than regex)
-        if ((byte >= 65 && byte <= 90) ||   // A-Z
-            (byte >= 97 && byte <= 122) ||  // a-z
-            (byte >= 48 && byte <= 57) ||   // 0-9
-            byte === 45 ||                  // -
-            byte === 33 ||                  // !
-            byte === 91 ||                  // [
-            byte === 93) {                  // ]
-          tagName += String.fromCharCode(byte);
+  private _getTag = (): string => {
+    let tag = "";
+    for (let j = 0; j < this.buffers.length; j++) {
+      const buf = this.buffers[j];
+      for (let k = j === 0 ? 1 : 0; k < buf.length; k++) {
+        const c = buf[k];
+        // More efficient tag name validation
+        if (
+          (c >= 65 && c <= 90) ||
+          (c >= 97 && c <= 122) ||
+          (c >= 48 && c <= 57) ||
+          c === 45 ||
+          c === 33 ||
+          c === 91 ||
+          c === 93
+        ) {
+          tag += String.fromCharCode(c);
         } else {
-          return tagName.toLowerCase();
+          return tag.toLowerCase();
         }
       }
     }
-
-    return tagName.toLowerCase();
+    return tag.toLowerCase();
   };
 
-  private testRawEnd = (
-    buffer: Buffer,
+  private _getLastBytes(): number[] {
+    const result: number[] = [];
+    const count = Math.min(this._lastCount, 9);
+    for (let i = 0; i < count; i++) {
+      const idx = (this._lastIndex - count + i + 9) % 9;
+      result.push(this._last[idx]);
+    }
+    return result;
+  }
+
+  private _testRaw = (
+    buf: Buffer,
     offset: number,
     index: number
   ): [Buffer, Buffer] | null => {
-    if (
-      !this.rawEndPattern ||
-      !compareBuffers(this.lastBytes, this.rawEndPattern)
-    ) {
-      return null;
-    }
+    const raw = this.raw;
+    if (!raw || !compare(this._getLastBytes(), raw)) return null;
 
-    this.buffers.push(buffer.subarray(offset, index + 1));
-    const combined = Buffer.concat(this.buffers);
-    const splitIndex = combined.length - this.rawEndPattern.length;
-
-    // For all raw end patterns, return content and end tag separately
-    return [combined.subarray(0, splitIndex), combined.subarray(splitIndex)];
+    this.buffers.push(buf.subarray(offset, index + 1));
+    const buffer = Buffer.concat(this.buffers);
+    const k = buffer.length - raw.length;
+    return [buffer.subarray(0, k), buffer.subarray(k)];
   };
 }
 
-export default MarkupTokenizer;
+export default () => {
+  return new MarkupTokenizer();
+};
