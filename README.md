@@ -29,10 +29,10 @@ This produces:
 
 ```
 ["open", "<section>"]
-[("text", "\n  ")]
-[("open", '<a href="/hello">')]
-[("text", "hello")]
-[("close", "</a>")]
-[("text", "\n")]
-[("close", "</section>")]
+["text", "\n  "]
+["open", '<a href="/hello">']
+["text", "hello"]
+["close", "</a>"]
+["text", "\n"]
+["close", "</section>"]
 ```
