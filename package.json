@@ -1,6 +1,6 @@
 {
   "name": "markup-tokenizer",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Markup tokenizer stream",
   "main": "./dist/cjs/index.js",
   "files": [
@@ -28,8 +28,7 @@
   "homepage": "https://github.com/bredele/markup-tokenizer#readme",
   "devDependencies": {
     "@types/node": "^24.0.7",
-    "cmplr": "^1.1.0",
-    "html-tokenize": "^2.0.1"
+    "cmplr": "^1.1.0"
   },
   "module": "./dist/esm/index.js",
   "types": "./dist/types/index.d.ts",
